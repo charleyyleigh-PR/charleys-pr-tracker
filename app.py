@@ -2,11 +2,11 @@
 import os
 import re
 import json
-import sqlite3
 from datetime import datetime, date
 from urllib.parse import urlparse, urljoin
 
 import pandas as pd
+import gspread
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
@@ -18,7 +18,6 @@ except Exception:
 
 
 APP_TITLE = "Charley’s PR Tracker ✨"
-DB_PATH = "pr_pink.db"
 
 PINK = "#ff5fa2"
 LIGHT_PINK = "#fff1f7"
@@ -69,102 +68,106 @@ REGIONS = ["UK", "US", "Europe", "Worldwide", "Unknown"]
 
 
 # -----------------------------
-# Database
+# Google Sheets storage
 # -----------------------------
-def db():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+PROFILE_HEADERS = [
+    "name", "email", "country", "niche", "instagram_url",
+    "instagram_followers", "tiktok_url", "tiktok_followers",
+    "youtube_url", "youtube_followers", "average_views",
+    "engagement_rate", "audience", "creator_bio", "media_kit_url"
+]
+
+OPPORTUNITY_HEADERS = [
+    "id", "brand", "category", "opportunity_type", "program_name",
+    "application_url", "contact_email", "brand_website", "instagram",
+    "region", "min_followers", "requirements", "compensation",
+    "eligibility", "match_score", "score_reason", "status", "favorite",
+    "date_found", "date_applied", "follow_up_date", "contact_person",
+    "response", "products_received", "deliverables", "content_due_date",
+    "payment", "notes", "source_query", "unique_key"
+]
+
+
+def storage_configured():
+    try:
+        return bool(st.secrets.get("google_sheet_id")) and "gcp_service_account" in st.secrets
+    except Exception:
+        return False
+
+
+@st.cache_resource(show_spinner=False)
+def sheets_client():
+    if not storage_configured():
+        return None
+    creds = dict(st.secrets["gcp_service_account"])
+    return gspread.service_account_from_dict(creds)
+
+
+@st.cache_resource(show_spinner=False)
+def spreadsheet():
+    client = sheets_client()
+    if client is None:
+        return None
+    return client.open_by_key(st.secrets["google_sheet_id"])
+
+
+def get_or_create_worksheet(title, headers):
+    ss = spreadsheet()
+    if ss is None:
+        return None
+    try:
+        ws = ss.worksheet(title)
+    except gspread.WorksheetNotFound:
+        ws = ss.add_worksheet(title=title, rows=1000, cols=max(20, len(headers)))
+    existing = ws.row_values(1)
+    if not existing:
+        ws.update(range_name="A1", values=[headers])
+    elif existing != headers:
+        # Preserve existing data while ensuring any newly added columns exist.
+        merged = existing + [h for h in headers if h not in existing]
+        ws.update(range_name="A1", values=[merged])
+    return ws
 
 
 def init_db():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS profile (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            name TEXT,
-            email TEXT,
-            country TEXT,
-            niche TEXT,
-            instagram_url TEXT,
-            instagram_followers INTEGER DEFAULT 0,
-            tiktok_url TEXT,
-            tiktok_followers INTEGER DEFAULT 0,
-            youtube_url TEXT,
-            youtube_followers INTEGER DEFAULT 0,
-            average_views INTEGER DEFAULT 0,
-            engagement_rate REAL DEFAULT 0,
-            audience TEXT,
-            creator_bio TEXT,
-            media_kit_url TEXT
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS opportunities (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            brand TEXT NOT NULL,
-            category TEXT DEFAULT 'Other',
-            opportunity_type TEXT DEFAULT 'Unknown',
-            program_name TEXT,
-            application_url TEXT,
-            contact_email TEXT,
-            brand_website TEXT,
-            instagram TEXT,
-            region TEXT DEFAULT 'Unknown',
-            min_followers INTEGER DEFAULT 0,
-            requirements TEXT,
-            compensation TEXT,
-            eligibility TEXT,
-            match_score INTEGER DEFAULT 50,
-            score_reason TEXT,
-            status TEXT DEFAULT 'Not Applied',
-            favorite INTEGER DEFAULT 0,
-            date_found TEXT,
-            date_applied TEXT,
-            follow_up_date TEXT,
-            contact_person TEXT,
-            response TEXT,
-            products_received TEXT,
-            deliverables TEXT,
-            content_due_date TEXT,
-            payment TEXT,
-            notes TEXT,
-            source_query TEXT,
-            unique_key TEXT UNIQUE
-        )
-    """)
-
-    conn.commit()
-    conn.close()
+    if not storage_configured():
+        return
+    get_or_create_worksheet("Profile", PROFILE_HEADERS)
+    get_or_create_worksheet("Opportunities", OPPORTUNITY_HEADERS)
 
 
 def load_profile():
-    conn = db()
-    row = conn.execute("SELECT * FROM profile WHERE id = 1").fetchone()
-    conn.close()
-    return dict(row) if row else {}
+    if not storage_configured():
+        return {}
+    try:
+        ws = get_or_create_worksheet("Profile", PROFILE_HEADERS)
+        rows = ws.get_all_records()
+        if not rows:
+            return {}
+        p = rows[0]
+        for key in ["instagram_followers", "tiktok_followers", "youtube_followers", "average_views"]:
+            try:
+                p[key] = int(float(p.get(key) or 0))
+            except Exception:
+                p[key] = 0
+        try:
+            p["engagement_rate"] = float(p.get("engagement_rate") or 0)
+        except Exception:
+            p["engagement_rate"] = 0.0
+        return p
+    except Exception as e:
+        st.error(f"Google Sheets profile read failed: {e}")
+        return {}
 
 
 def save_profile(data):
-    conn = db()
-    cols = list(data.keys())
-    values = [data[c] for c in cols]
-    placeholders = ", ".join(["?"] * (len(cols) + 1))
-    updates = ", ".join([f"{c}=excluded.{c}" for c in cols])
-
-    conn.execute(
-        f"""
-        INSERT INTO profile (id, {", ".join(cols)})
-        VALUES ({placeholders})
-        ON CONFLICT(id) DO UPDATE SET {updates}
-        """,
-        [1] + values,
-    )
-    conn.commit()
-    conn.close()
+    if not storage_configured():
+        raise RuntimeError("Google Sheets is not connected yet.")
+    ws = get_or_create_worksheet("Profile", PROFILE_HEADERS)
+    values = [data.get(h, "") for h in PROFILE_HEADERS]
+    if ws.row_count < 2:
+        ws.add_rows(1)
+    ws.update(range_name=f"A2:{gspread.utils.rowcol_to_a1(2, len(PROFILE_HEADERS)).split('2')[0]}2", values=[values])
 
 
 def make_unique_key(brand, application_url, contact_email, brand_website):
@@ -177,69 +180,114 @@ def make_unique_key(brand, application_url, contact_email, brand_website):
     return re.sub(r"\s+", " ", base)
 
 
+def _coerce_opportunity_df(df):
+    if df.empty:
+        return pd.DataFrame(columns=OPPORTUNITY_HEADERS)
+    for c in OPPORTUNITY_HEADERS:
+        if c not in df.columns:
+            df[c] = ""
+    for c in ["id", "min_followers", "match_score", "favorite"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0).astype(int)
+    return df[OPPORTUNITY_HEADERS]
+
+
 def insert_opportunity(data):
+    if not storage_configured():
+        raise RuntimeError("Google Sheets is not connected yet.")
     data = dict(data)
     if not data.get("date_found"):
         data["date_found"] = datetime.now().strftime("%Y-%m-%d")
 
     data["unique_key"] = make_unique_key(
-        data.get("brand"),
-        data.get("application_url"),
-        data.get("contact_email"),
-        data.get("brand_website"),
+        data.get("brand"), data.get("application_url"),
+        data.get("contact_email"), data.get("brand_website")
     )
 
-    allowed = {
-        "brand", "category", "opportunity_type", "program_name", "application_url",
-        "contact_email", "brand_website", "instagram", "region", "min_followers",
-        "requirements", "compensation", "eligibility", "match_score", "score_reason",
-        "status", "favorite", "date_found", "date_applied", "follow_up_date",
-        "contact_person", "response", "products_received", "deliverables",
-        "content_due_date", "payment", "notes", "source_query", "unique_key"
-    }
-    data = {k: v for k, v in data.items() if k in allowed}
-    cols = list(data.keys())
-    values = [data[c] for c in cols]
-    placeholders = ",".join(["?"] * len(cols))
+    ws = get_or_create_worksheet("Opportunities", OPPORTUNITY_HEADERS)
+    rows = ws.get_all_records()
+    existing_keys = {str(r.get("unique_key", "")) for r in rows}
+    if data["unique_key"] in existing_keys:
+        return False
 
-    conn = db()
-    try:
-        conn.execute(
-            f"INSERT OR IGNORE INTO opportunities ({','.join(cols)}) VALUES ({placeholders})",
-            values,
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    ids = []
+    for r in rows:
+        try:
+            ids.append(int(float(r.get("id") or 0)))
+        except Exception:
+            pass
+    data["id"] = max(ids, default=0) + 1
+
+    row = [data.get(h, "") for h in OPPORTUNITY_HEADERS]
+    ws.append_row(row, value_input_option="USER_ENTERED")
+    return True
 
 
 def get_opportunities():
-    conn = db()
-    df = pd.read_sql_query("SELECT * FROM opportunities ORDER BY id DESC", conn)
-    conn.close()
-    return df
+    if not storage_configured():
+        return pd.DataFrame(columns=OPPORTUNITY_HEADERS)
+    try:
+        ws = get_or_create_worksheet("Opportunities", OPPORTUNITY_HEADERS)
+        rows = ws.get_all_records()
+        df = pd.DataFrame(rows)
+        return _coerce_opportunity_df(df).sort_values("id", ascending=False) if rows else pd.DataFrame(columns=OPPORTUNITY_HEADERS)
+    except Exception as e:
+        st.error(f"Google Sheets opportunity read failed: {e}")
+        return pd.DataFrame(columns=OPPORTUNITY_HEADERS)
 
 
 def update_opportunity(opp_id, fields):
     if not fields:
         return
-    conn = db()
-    keys = list(fields.keys())
-    set_clause = ", ".join([f"{k}=?" for k in keys])
-    conn.execute(
-        f"UPDATE opportunities SET {set_clause} WHERE id=?",
-        [fields[k] for k in keys] + [opp_id],
-    )
-    conn.commit()
-    conn.close()
+    if not storage_configured():
+        raise RuntimeError("Google Sheets is not connected yet.")
+    ws = get_or_create_worksheet("Opportunities", OPPORTUNITY_HEADERS)
+    values = ws.get_all_values()
+    if not values:
+        return
+    headers = values[0]
+    try:
+        id_col = headers.index("id")
+    except ValueError:
+        return
+    target_row = None
+    for idx, row in enumerate(values[1:], start=2):
+        try:
+            if int(float(row[id_col])) == int(opp_id):
+                target_row = idx
+                break
+        except Exception:
+            continue
+    if target_row is None:
+        return
+    updates = []
+    for key, value in fields.items():
+        if key not in headers:
+            continue
+        col = headers.index(key) + 1
+        updates.append({"range": gspread.utils.rowcol_to_a1(target_row, col), "values": [[value]]})
+    if updates:
+        ws.batch_update(updates)
 
 
 def delete_opportunity(opp_id):
-    conn = db()
-    conn.execute("DELETE FROM opportunities WHERE id=?", (opp_id,))
-    conn.commit()
-    conn.close()
-
+    if not storage_configured():
+        raise RuntimeError("Google Sheets is not connected yet.")
+    ws = get_or_create_worksheet("Opportunities", OPPORTUNITY_HEADERS)
+    values = ws.get_all_values()
+    if not values:
+        return
+    headers = values[0]
+    try:
+        id_col = headers.index("id")
+    except ValueError:
+        return
+    for idx, row in enumerate(values[1:], start=2):
+        try:
+            if int(float(row[id_col])) == int(opp_id):
+                ws.delete_rows(idx)
+                return
+        except Exception:
+            continue
 
 # -----------------------------
 # UI
@@ -1181,20 +1229,25 @@ def main():
         st.divider()
         st.markdown("### 🔑 Connections")
 
+        if storage_configured():
+            st.success("Google Sheets connected ✅")
+        else:
+            st.warning("Google Sheets not connected")
+
         google_key = st.text_input(
             "Google API key",
-            value=os.getenv("GOOGLE_API_KEY", ""),
+            value=st.secrets.get("GOOGLE_API_KEY", os.getenv("GOOGLE_API_KEY", "")),
             type="password",
             help="Used for Google Custom Search."
         )
         google_cse = st.text_input(
             "Google Search Engine ID",
-            value=os.getenv("GOOGLE_CSE_ID", ""),
+            value=st.secrets.get("GOOGLE_CSE_ID", os.getenv("GOOGLE_CSE_ID", "")),
             type="password",
         )
         openai_key = st.text_input(
             "OpenAI API key",
-            value=os.getenv("OPENAI_API_KEY", ""),
+            value=st.secrets.get("OPENAI_API_KEY", os.getenv("OPENAI_API_KEY", "")),
             type="password",
             help="Optional. Used only for application/email generation."
         )
