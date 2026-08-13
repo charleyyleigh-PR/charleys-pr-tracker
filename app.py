@@ -1,13 +1,11 @@
-import os
-import re
-import json
+import os, re, json
 from datetime import datetime
 from urllib.parse import urlparse
 
 import pandas as pd
-import gspread
 import requests
 import streamlit as st
+import gspread
 from bs4 import BeautifulSoup
 
 try:
@@ -15,29 +13,7 @@ try:
 except Exception:
     OpenAI = None
 
-
-# =========================================================
-# APP SETTINGS
-# =========================================================
-
-APP_TITLE = "Charley’s PR Tracker ✨"
-
-PINK = "#ff5fa2"
-HOT_PINK = "#ff3f92"
-TEXT = "#3d2b36"
-MUTED = "#7c6672"
-
-OPPORTUNITY_TYPES = [
-    "PR / Gifting",
-    "Ambassador",
-    "Creator Program",
-    "Affiliate",
-    "UGC",
-    "Paid Collaboration",
-    "Influencer Program",
-    "Partnership",
-    "Unknown",
-]
+APP_NAME = "Charley’s PR Tracker"
 
 STATUSES = [
     "Not Applied",
@@ -64,6 +40,18 @@ CATEGORIES = [
     "Other",
 ]
 
+OPP_TYPES = [
+    "PR / Gifting",
+    "Ambassador",
+    "Creator Program",
+    "Affiliate",
+    "UGC",
+    "Paid Collaboration",
+    "Influencer Program",
+    "Partnership",
+    "Unknown",
+]
+
 REGIONS = [
     "UK",
     "US",
@@ -71,11 +59,6 @@ REGIONS = [
     "Worldwide",
     "Unknown",
 ]
-
-
-# =========================================================
-# GOOGLE SHEETS
-# =========================================================
 
 PROFILE_HEADERS = [
     "name",
@@ -95,8 +78,7 @@ PROFILE_HEADERS = [
     "media_kit_url",
 ]
 
-
-OPPORTUNITY_HEADERS = [
+OPP_HEADERS = [
     "id",
     "brand",
     "category",
@@ -130,88 +112,272 @@ OPPORTUNITY_HEADERS = [
 ]
 
 
-def storage_configured():
+# =========================
+# UI
+# =========================
+
+def inject_css():
+    st.markdown(
+        """
+        <style>
+
+        .stApp{
+            background:
+            radial-gradient(
+                circle at 10% 5%,
+                rgba(255,210,230,.7),
+                transparent 24%
+            ),
+            radial-gradient(
+                circle at 90% 0%,
+                rgba(235,220,255,.6),
+                transparent 24%
+            ),
+            linear-gradient(
+                180deg,
+                #fffafd 0%,
+                #fff3f8 100%
+            );
+        }
+
+        [data-testid="stSidebar"]{
+            background:
+            linear-gradient(
+                180deg,
+                #ffd9e9 0%,
+                #fff4f8 58%,
+                #f7efff 100%
+            );
+
+            border-right:
+            1px solid rgba(255,95,162,.18);
+        }
+
+        h1,h2,h3{
+            color:#5f2b48!important;
+        }
+
+        .hero{
+            background:
+            linear-gradient(
+                135deg,
+                rgba(255,255,255,.98),
+                rgba(255,235,244,.98)
+            );
+
+            border:
+            1px solid rgba(255,95,162,.22);
+
+            border-radius:26px;
+
+            padding:24px 28px;
+
+            margin-bottom:18px;
+
+            box-shadow:
+            0 14px 36px rgba(140,75,105,.09);
+        }
+
+        .hero-title{
+            font-size:38px;
+            font-weight:850;
+            color:#5f2b48;
+        }
+
+        .hero-sub{
+            font-size:15px;
+            color:#7c6672;
+            margin-top:5px;
+        }
+
+        .metric-card{
+            background:rgba(255,255,255,.94);
+
+            border:
+            1px solid rgba(255,95,162,.16);
+
+            border-radius:20px;
+
+            padding:17px 18px;
+
+            min-height:100px;
+
+            box-shadow:
+            0 8px 22px rgba(140,75,105,.06);
+        }
+
+        .metric-label{
+            font-size:13px;
+            color:#7c6672;
+            font-weight:700;
+        }
+
+        .metric-value{
+            font-size:29px;
+            color:#5f2b48;
+            font-weight:850;
+            margin-top:6px;
+        }
+
+        div.stButton > button{
+            border-radius:13px;
+            font-weight:750;
+        }
+
+        div.stButton > button[kind="primary"]{
+            background:
+            linear-gradient(
+                135deg,
+                #ff5fa2,
+                #ff3f92
+            );
+
+            color:white;
+            border:none;
+        }
+
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def hero(
+    title,
+    subtitle,
+    emoji="🎀",
+):
+    st.markdown(
+        f"""<div class="hero"><div class="hero-title">{emoji} {title}</div><div class="hero-sub">{subtitle}</div></div>""",
+        unsafe_allow_html=True,
+    )
+
+
+def metric_card(
+    label,
+    value,
+    note="",
+):
+    return f"""<div class="metric-card"><div class="metric-label">{label}</div><div class="metric-value">{value}</div><div style="font-size:12px;color:#7c6672;margin-top:4px;">{note}</div></div>"""
+
+
+# =========================
+# GOOGLE SHEETS
+# =========================
+
+def storage_ready():
     try:
         return (
-            bool(st.secrets.get("google_sheet_id"))
-            and "gcp_service_account" in st.secrets
+            bool(
+                st.secrets.get(
+                    "google_sheet_id"
+                )
+            )
+            and
+            "gcp_service_account"
+            in st.secrets
         )
     except Exception:
         return False
 
 
-@st.cache_resource(show_spinner=False)
-def sheets_client():
+@st.cache_resource(
+    show_spinner=False
+)
+def sheet_client():
 
-    if not storage_configured():
+    if not storage_ready():
         return None
 
-    credentials = dict(
-        st.secrets["gcp_service_account"]
+    return (
+        gspread
+        .service_account_from_dict(
+            dict(
+                st.secrets[
+                    "gcp_service_account"
+                ]
+            )
+        )
     )
 
-    return gspread.service_account_from_dict(
-        credentials
-    )
 
+@st.cache_resource(
+    show_spinner=False
+)
+def workbook():
 
-@st.cache_resource(show_spinner=False)
-def spreadsheet():
+    client = sheet_client()
 
-    client = sheets_client()
-
-    if client is None:
+    if not client:
         return None
 
     return client.open_by_key(
-        st.secrets["google_sheet_id"]
+        st.secrets[
+            "google_sheet_id"
+        ]
     )
 
 
-def get_or_create_worksheet(title, headers):
+def worksheet(
+    title,
+    headers,
+):
 
-    ss = spreadsheet()
+    ss = workbook()
 
     if ss is None:
         return None
 
     try:
-        ws = ss.worksheet(title)
+
+        ws = ss.worksheet(
+            title
+        )
 
     except gspread.WorksheetNotFound:
 
         ws = ss.add_worksheet(
             title=title,
             rows=1000,
-            cols=max(20, len(headers)),
+            cols=max(
+                20,
+                len(headers),
+            ),
         )
 
-    current_headers = ws.row_values(1)
+    current = ws.row_values(
+        1
+    )
 
-    if not current_headers:
+    if not current:
 
         ws.update(
             range_name="A1",
-            values=[headers],
+            values=[
+                headers
+            ],
         )
 
     else:
 
-        missing = [
-            h
-            for h in headers
-            if h not in current_headers
-        ]
+        merged = (
+            current
+            +
+            [
+                h
+                for h
+                in headers
+                if h not in current
+            ]
+        )
 
-        if missing:
-
-            new_headers = (
-                current_headers + missing
-            )
+        if merged != current:
 
             ws.update(
                 range_name="A1",
-                values=[new_headers],
+                values=[
+                    merged
+                ],
             )
 
     return ws
@@ -219,60 +385,62 @@ def get_or_create_worksheet(title, headers):
 
 def init_storage():
 
-    if not storage_configured():
-        return
+    if storage_ready():
 
-    get_or_create_worksheet(
-        "Profile",
-        PROFILE_HEADERS,
-    )
-
-    get_or_create_worksheet(
-        "Opportunities",
-        OPPORTUNITY_HEADERS,
-    )
-
-
-def load_profile():
-
-    if not storage_configured():
-        return {}
-
-    try:
-
-        ws = get_or_create_worksheet(
+        worksheet(
             "Profile",
             PROFILE_HEADERS,
         )
 
-        rows = ws.get_all_records()
+        worksheet(
+            "Opportunities",
+            OPP_HEADERS,
+        )
+
+
+def load_profile():
+
+    if not storage_ready():
+        return {}
+
+    try:
+
+        rows = worksheet(
+            "Profile",
+            PROFILE_HEADERS,
+        ).get_all_records()
 
         if not rows:
             return {}
 
         profile = rows[0]
 
-        integer_fields = [
+        number_fields = [
             "instagram_followers",
             "tiktok_followers",
             "youtube_followers",
             "average_views",
         ]
 
-        for field in integer_fields:
+        for key in number_fields:
 
             try:
-                profile[field] = int(
+                profile[key] = int(
                     float(
-                        profile.get(field) or 0
+                        profile.get(
+                            key
+                        )
+                        or 0
                     )
                 )
 
             except Exception:
-                profile[field] = 0
+                profile[key] = 0
 
         try:
-            profile["engagement_rate"] = float(
+            profile[
+                "engagement_rate"
+            ] = float(
                 profile.get(
                     "engagement_rate"
                 )
@@ -280,7 +448,9 @@ def load_profile():
             )
 
         except Exception:
-            profile["engagement_rate"] = 0.0
+            profile[
+                "engagement_rate"
+            ] = 0.0
 
         return profile
 
@@ -293,80 +463,95 @@ def load_profile():
         return {}
 
 
-def save_profile(data):
+def save_profile(
+    data
+):
 
-    if not storage_configured():
-        raise RuntimeError(
-            "Google Sheets is not connected."
-        )
-
-    ws = get_or_create_worksheet(
+    ws = worksheet(
         "Profile",
         PROFILE_HEADERS,
     )
 
     values = [
-        data.get(header, "")
-        for header in PROFILE_HEADERS
+        data.get(
+            header,
+            "",
+        )
+        for header
+        in PROFILE_HEADERS
     ]
 
-    end_cell = gspread.utils.rowcol_to_a1(
-        2,
-        len(PROFILE_HEADERS),
+    end = (
+        gspread.utils
+        .rowcol_to_a1(
+            2,
+            len(
+                PROFILE_HEADERS
+            ),
+        )
     )
 
     ws.update(
-        range_name=f"A2:{end_cell}",
-        values=[values],
+        range_name=f"A2:{end}",
+        values=[
+            values
+        ],
     )
 
 
-def make_unique_key(
-    brand,
-    application_url,
-    contact_email,
-    brand_website,
+def unique_key(
+    data
 ):
 
-    parts = [
-        brand or "",
-        application_url or "",
-        contact_email or "",
-        brand_website or "",
+    fields = [
+        "brand",
+        "application_url",
+        "contact_email",
+        "brand_website",
     ]
 
     return "|".join(
-        p.strip().lower()
-        for p in parts
+        str(
+            data.get(
+                field,
+                "",
+            )
+            or ""
+        )
+        .strip()
+        .lower()
+
+        for field
+        in fields
     )
 
 
 def get_opportunities():
 
-    if not storage_configured():
+    if not storage_ready():
 
         return pd.DataFrame(
-            columns=OPPORTUNITY_HEADERS
+            columns=OPP_HEADERS
         )
 
     try:
 
-        ws = get_or_create_worksheet(
+        rows = worksheet(
             "Opportunities",
-            OPPORTUNITY_HEADERS,
-        )
-
-        rows = ws.get_all_records()
+            OPP_HEADERS,
+        ).get_all_records()
 
         if not rows:
 
             return pd.DataFrame(
-                columns=OPPORTUNITY_HEADERS
+                columns=OPP_HEADERS
             )
 
-        df = pd.DataFrame(rows)
+        df = pd.DataFrame(
+            rows
+        )
 
-        for column in OPPORTUNITY_HEADERS:
+        for column in OPP_HEADERS:
 
             if column not in df.columns:
                 df[column] = ""
@@ -378,71 +563,88 @@ def get_opportunities():
             "favorite",
         ]:
 
-            df[column] = pd.to_numeric(
-                df[column],
-                errors="coerce",
-            ).fillna(0).astype(int)
+            df[column] = (
+                pd.to_numeric(
+                    df[column],
+                    errors="coerce",
+                )
+                .fillna(0)
+                .astype(int)
+            )
 
-        return df[
-            OPPORTUNITY_HEADERS
-        ].sort_values(
-            "id",
-            ascending=False,
+        return (
+            df[
+                OPP_HEADERS
+            ]
+            .sort_values(
+                "id",
+                ascending=False,
+            )
         )
 
     except Exception as e:
 
         st.error(
-            f"Google Sheets read failed: {e}"
+            f"Google Sheets opportunity read failed: {e}"
         )
 
         return pd.DataFrame(
-            columns=OPPORTUNITY_HEADERS
+            columns=OPP_HEADERS
         )
 
 
-def insert_opportunity(data):
+def insert_opportunity(
+    data
+):
 
-    if not storage_configured():
-
-        raise RuntimeError(
-            "Google Sheets is not connected."
-        )
-
-    data = dict(data)
-
-    if not data.get("date_found"):
-
-        data["date_found"] = (
-            datetime.now()
-            .strftime("%Y-%m-%d")
-        )
-
-    data["unique_key"] = make_unique_key(
-        data.get("brand"),
-        data.get("application_url"),
-        data.get("contact_email"),
-        data.get("brand_website"),
-    )
-
-    ws = get_or_create_worksheet(
+    ws = worksheet(
         "Opportunities",
-        OPPORTUNITY_HEADERS,
+        OPP_HEADERS,
     )
 
-    rows = ws.get_all_records()
+    rows = (
+        ws.get_all_records()
+    )
 
-    existing_keys = {
+    data = dict(
+        data
+    )
+
+    if not data.get(
+        "date_found"
+    ):
+        data[
+            "date_found"
+        ] = (
+            datetime.now()
+            .strftime(
+                "%Y-%m-%d"
+            )
+        )
+
+    data[
+        "unique_key"
+    ] = unique_key(
+        data
+    )
+
+    existing = {
         str(
             row.get(
                 "unique_key",
                 "",
             )
         )
-        for row in rows
+        for row
+        in rows
     }
 
-    if data["unique_key"] in existing_keys:
+    if (
+        data[
+            "unique_key"
+        ]
+        in existing
+    ):
         return False
 
     ids = []
@@ -454,7 +656,10 @@ def insert_opportunity(data):
             ids.append(
                 int(
                     float(
-                        row.get("id") or 0
+                        row.get(
+                            "id"
+                        )
+                        or 0
                     )
                 )
             )
@@ -462,51 +667,58 @@ def insert_opportunity(data):
         except Exception:
             pass
 
-    data["id"] = max(
+    data[
+        "id"
+    ] = max(
         ids,
         default=0,
     ) + 1
 
     values = [
-        data.get(header, "")
-        for header in OPPORTUNITY_HEADERS
+        data.get(
+            header,
+            "",
+        )
+        for header
+        in OPP_HEADERS
     ]
 
     ws.append_row(
         values,
-        value_input_option="USER_ENTERED",
+        value_input_option=
+        "USER_ENTERED",
     )
 
     return True
 
 
 def update_opportunity(
-    opportunity_id,
+    opp_id,
     fields,
 ):
 
-    if not fields:
-        return
-
-    ws = get_or_create_worksheet(
+    ws = worksheet(
         "Opportunities",
-        OPPORTUNITY_HEADERS,
+        OPP_HEADERS,
     )
 
-    values = ws.get_all_values()
+    values = (
+        ws.get_all_values()
+    )
 
     if not values:
         return
 
     headers = values[0]
 
-    try:
-        id_column = headers.index("id")
-
-    except ValueError:
+    if "id" not in headers:
         return
 
-    target_row = None
+    id_col = headers.index(
+        "id"
+    )
+
+    target = None
 
     for row_number, row in enumerate(
         values[1:],
@@ -517,19 +729,24 @@ def update_opportunity(
 
             if int(
                 float(
-                    row[id_column]
+                    row[
+                        id_col
+                    ]
                 )
             ) == int(
-                opportunity_id
+                opp_id
             ):
 
-                target_row = row_number
+                target = (
+                    row_number
+                )
+
                 break
 
         except Exception:
-            continue
+            pass
 
-    if target_row is None:
+    if not target:
         return
 
     updates = []
@@ -540,44 +757,58 @@ def update_opportunity(
             continue
 
         column = (
-            headers.index(key) + 1
+            headers.index(
+                key
+            )
+            + 1
         )
 
         updates.append(
             {
-                "range": gspread.utils.rowcol_to_a1(
-                    target_row,
+                "range":
+                gspread.utils
+                .rowcol_to_a1(
+                    target,
                     column,
                 ),
-                "values": [[value]],
+
+                "values":
+                [
+                    [value]
+                ],
             }
         )
 
     if updates:
-        ws.batch_update(updates)
+        ws.batch_update(
+            updates
+        )
 
 
 def delete_opportunity(
-    opportunity_id
+    opp_id
 ):
 
-    ws = get_or_create_worksheet(
+    ws = worksheet(
         "Opportunities",
-        OPPORTUNITY_HEADERS,
+        OPP_HEADERS,
     )
 
-    values = ws.get_all_values()
+    values = (
+        ws.get_all_values()
+    )
 
     if not values:
         return
 
     headers = values[0]
 
-    try:
-        id_column = headers.index("id")
-
-    except ValueError:
+    if "id" not in headers:
         return
+
+    id_col = headers.index(
+        "id"
+    )
 
     for row_number, row in enumerate(
         values[1:],
@@ -588,10 +819,12 @@ def delete_opportunity(
 
             if int(
                 float(
-                    row[id_column]
+                    row[
+                        id_col
+                    ]
                 )
             ) == int(
-                opportunity_id
+                opp_id
             ):
 
                 ws.delete_rows(
@@ -601,12 +834,12 @@ def delete_opportunity(
                 return
 
         except Exception:
-            continue
+            pass
 
 
-# =========================================================
+# =========================
 # SERPER SEARCH
-# =========================================================
+# =========================
 
 def serper_search(
     query,
@@ -614,104 +847,127 @@ def serper_search(
     num=10,
 ):
 
-    url = (
-        "https://google.serper.dev/search"
-    )
-
-    headers = {
-        "X-API-KEY": api_key,
-        "Content-Type": "application/json",
-    }
-
-    payload = {
-        "q": query,
-        "num": min(
-            max(
-                int(num),
-                1,
-            ),
-            20,
-        ),
-    }
-
     response = requests.post(
-        url,
-        headers=headers,
-        json=payload,
+        "https://google.serper.dev/search",
+
+        headers={
+            "X-API-KEY":
+            api_key,
+
+            "Content-Type":
+            "application/json",
+        },
+
+        json={
+            "q":
+            query,
+
+            "num":
+            min(
+                max(
+                    int(
+                        num
+                    ),
+                    1,
+                ),
+                20,
+            ),
+        },
+
         timeout=20,
     )
 
     response.raise_for_status()
 
-    data = response.json()
+    data = (
+        response.json()
+    )
 
-    results = []
+    return [
+        {
+            "title":
+            item.get(
+                "title",
+                "",
+            ),
 
-    for item in data.get(
-        "organic",
-        [],
-    ):
+            "link":
+            item.get(
+                "link",
+                "",
+            ),
 
-        results.append(
-            {
-                "title": item.get(
-                    "title",
-                    "",
-                ),
-                "link": item.get(
-                    "link",
-                    "",
-                ),
-                "snippet": item.get(
-                    "snippet",
-                    "",
-                ),
-            }
+            "snippet":
+            item.get(
+                "snippet",
+                "",
+            ),
+        }
+
+        for item
+        in data.get(
+            "organic",
+            [],
         )
+    ]
 
-    return results
 
+# =========================
+# WEB EXTRACTION
+# =========================
 
-# =========================================================
-# WEB PAGE ANALYSIS
-# =========================================================
-
-def fetch_page(url):
-
-    headers = {
-        "User-Agent":
-        "Mozilla/5.0 CharleysPRTracker/1.0"
-    }
+def fetch_page(
+    url
+):
 
     response = requests.get(
         url,
-        headers=headers,
+
+        headers={
+            "User-Agent":
+            "Mozilla/5.0 (compatible; CharleysPRTracker/1.0)"
+        },
+
         timeout=15,
+
         allow_redirects=True,
     )
 
     response.raise_for_status()
 
-    content_type = response.headers.get(
-        "content-type",
-        "",
-    )
+    if (
+        "text/html"
+        not in response.headers.get(
+            "content-type",
+            "",
+        )
+    ):
 
-    if "text/html" not in content_type:
-        return "", response.url
+        return (
+            "",
+            response.url,
+        )
 
     return (
-        response.text[:1_500_000],
+        response.text[
+            :1_500_000
+        ],
         response.url,
     )
 
 
-def extract_emails(text):
+def extract_emails(
+    text
+):
 
     pattern = (
-        r"\b[A-Za-z0-9._%+-]+"
-        r"@[A-Za-z0-9.-]+"
-        r"\.[A-Za-z]{2,}\b"
+        r"\b"
+        r"[A-Za-z0-9._%+-]+"
+        r"@"
+        r"[A-Za-z0-9.-]+"
+        r"\."
+        r"[A-Za-z]{2,}"
+        r"\b"
     )
 
     return sorted(
@@ -724,12 +980,11 @@ def extract_emails(text):
     )
 
 
-def best_contact_email(emails):
+def best_email(
+    emails
+):
 
-    if not emails:
-        return ""
-
-    priority = [
+    keywords = [
         "pr",
         "press",
         "creator",
@@ -740,17 +995,22 @@ def best_contact_email(emails):
         "affiliate",
     ]
 
-    for word in priority:
+    for keyword in keywords:
 
         for email in emails:
 
-            if word in email.lower():
+            if keyword in email.lower():
                 return email
 
-    return emails[0]
+    if emails:
+        return emails[0]
+
+    return ""
 
 
-def classify_opportunity(text):
+def classify(
+    text
+):
 
     text = (
         text or ""
@@ -767,14 +1027,19 @@ def classify_opportunity(text):
 
     if (
         "gifting" in text
-        or "gifted" in text
-        or "pr list" in text
+        or
+        "gifted" in text
+        or
+        "pr list" in text
     ):
         return "PR / Gifting"
 
     if (
-        "creator program" in text
-        or "creator programme" in text
+        "creator program"
+        in text
+        or
+        "creator programme"
+        in text
     ):
         return "Creator Program"
 
@@ -782,21 +1047,26 @@ def classify_opportunity(text):
         return "Influencer Program"
 
     if (
-        "partnership" in text
-        or "collaborat" in text
+        "partnership"
+        in text
+        or
+        "collaborat"
+        in text
     ):
         return "Partnership"
 
     return "Unknown"
 
 
-def infer_category(text):
+def infer_category(
+    text
+):
 
     text = (
         text or ""
     ).lower()
 
-    categories = [
+    checks = [
 
         (
             "Skincare",
@@ -869,14 +1139,14 @@ def infer_category(text):
                 "lifestyle",
             ],
         ),
-
     ]
 
-    for category, words in categories:
+    for category, words in checks:
 
         if any(
             word in text
-            for word in words
+            for word
+            in words
         ):
 
             return category
@@ -884,22 +1154,29 @@ def infer_category(text):
     return "Other"
 
 
-def infer_region(text):
+def infer_region(
+    text
+):
 
     text = (
         text or ""
     ).lower()
 
-    if (
-        "worldwide" in text
-        or "global" in text
-        or "international" in text
+    if any(
+        word in text
+        for word
+        in [
+            "worldwide",
+            "global",
+            "international",
+        ]
     ):
         return "Worldwide"
 
     if any(
         word in text
-        for word in [
+        for word
+        in [
             "united kingdom",
             " uk ",
             "british",
@@ -912,7 +1189,8 @@ def infer_region(text):
 
     if any(
         word in text
-        for word in [
+        for word
+        in [
             "united states",
             " usa ",
             " u.s.",
@@ -920,16 +1198,22 @@ def infer_region(text):
     ):
         return "US"
 
-    if (
-        "europe" in text
-        or "european" in text
+    if any(
+        word in text
+        for word
+        in [
+            "europe",
+            "european",
+        ]
     ):
         return "Europe"
 
     return "Unknown"
 
 
-def extract_min_followers(text):
+def min_followers(
+    text
+):
 
     text = (
         text or ""
@@ -940,15 +1224,11 @@ def extract_min_followers(text):
 
     patterns = [
 
-        r"(\d+)\s*k\+?\s*followers",
+        r"(\d+)\s*k\+?\s*followers?",
 
-        r"(?:minimum|at least)"
-        r"\s*(\d+)\s*k"
-        r"\s*followers?",
+        r"(?:minimum|at least)\s*(\d+)\s*k\s*followers?",
 
-        r"(?:minimum|at least)"
-        r"\s*(\d{3,})"
-        r"\s*followers?",
+        r"(?:minimum|at least)\s*(\d{3,})\s*followers?",
     ]
 
     for pattern in patterns:
@@ -960,19 +1240,22 @@ def extract_min_followers(text):
 
         if match:
 
-            value = int(
+            number = int(
                 match.group(1)
             )
 
-            if "k" in match.group(0):
-                value *= 1000
+            if (
+                "k"
+                in match.group(0)
+            ):
+                number *= 1000
 
-            return value
+            return number
 
     return 0
 
 
-def brand_from_result(
+def brand_name(
     title,
     url,
 ):
@@ -983,7 +1266,7 @@ def brand_from_result(
         title or "",
     ).strip()
 
-    generic_titles = {
+    generic = {
         "ambassador program",
         "affiliate program",
         "creator program",
@@ -995,15 +1278,19 @@ def brand_from_result(
 
     if (
         title
-        and title.lower()
-        not in generic_titles
-        and len(title) <= 70
+        and
+        title.lower()
+        not in generic
+        and
+        len(title)
+        <= 70
     ):
-
         return title
 
-    domain = (
-        urlparse(url)
+    host = (
+        urlparse(
+            url
+        )
         .netloc
         .lower()
         .replace(
@@ -1012,8 +1299,8 @@ def brand_from_result(
         )
     )
 
-    name = (
-        domain
+    return (
+        host
         .split(".")[0]
         .replace(
             "-",
@@ -1022,26 +1309,24 @@ def brand_from_result(
         .title()
     )
 
-    return name
 
-
-# =========================================================
+# =========================
 # MATCH SCORE
-# =========================================================
+# =========================
 
-def calculate_match_score(
+def score_match(
     profile,
     region,
-    min_followers,
+    minimum,
     category,
-    opportunity_type,
+    opp_type,
     text,
 ):
 
     score = 55
     reasons = []
 
-    country = (
+    country = str(
         profile.get(
             "country",
             "",
@@ -1049,7 +1334,7 @@ def calculate_match_score(
         or ""
     ).lower()
 
-    niche = (
+    niche = str(
         profile.get(
             "niche",
             "",
@@ -1061,24 +1346,21 @@ def calculate_match_score(
 
         int(
             profile.get(
-                "instagram_followers",
-                0,
+                "instagram_followers"
             )
             or 0
         ),
 
         int(
             profile.get(
-                "tiktok_followers",
-                0,
+                "tiktok_followers"
             )
             or 0
         ),
 
         int(
             profile.get(
-                "youtube_followers",
-                0,
+                "youtube_followers"
             )
             or 0
         ),
@@ -1089,54 +1371,60 @@ def calculate_match_score(
         score += 12
 
         reasons.append(
-            "Worldwide program"
+            "Worldwide"
         )
 
     elif (
         region == "UK"
-        and (
-            "uk" in country
-            or "united kingdom"
-            in country
-            or "england" in country
+        and
+        any(
+            word in country
+            for word
+            in [
+                "uk",
+                "united kingdom",
+                "england",
+            ]
         )
     ):
 
         score += 15
 
         reasons.append(
-            "UK eligibility matches profile"
+            "UK location match"
         )
 
     elif (
-        region in [
+        region
+        in [
             "US",
             "Europe",
         ]
-        and region.lower()
+        and
+        region.lower()
         not in country
     ):
 
         score -= 10
 
         reasons.append(
-            f"{region} may not match profile location"
+            f"{region} may not match"
         )
 
-    if min_followers == 0:
+    if minimum == 0:
 
         score += 8
 
         reasons.append(
-            "No public follower minimum found"
+            "No public follower minimum"
         )
 
-    elif followers >= min_followers:
+    elif followers >= minimum:
 
         score += 18
 
         reasons.append(
-            "Follower count meets requirement"
+            "Follower requirement met"
         )
 
     else:
@@ -1144,7 +1432,7 @@ def calculate_match_score(
         score -= 28
 
         reasons.append(
-            "Follower count may be below requirement"
+            "Follower requirement may not be met"
         )
 
     if (
@@ -1155,12 +1443,13 @@ def calculate_match_score(
         score += 12
 
         reasons.append(
-            "Category matches creator niche"
+            "Niche match"
         )
 
     elif any(
         word in niche
-        for word in [
+        for word
+        in [
             "beauty",
             "lifestyle",
             "fashion",
@@ -1170,27 +1459,28 @@ def calculate_match_score(
         ]
     ):
 
-        if category in CATEGORIES:
+        score += 7
 
-            score += 7
+        reasons.append(
+            "Broad niche fit"
+        )
 
-            reasons.append(
-                "Broad creator niche fit"
-            )
-
-    if opportunity_type != "Unknown":
+    if (
+        opp_type
+        != "Unknown"
+    ):
 
         score += 5
 
         reasons.append(
-            f"Clear {opportunity_type} opportunity"
+            f"Clear {opp_type} opportunity"
         )
 
     if (
         "applications are closed"
-        in text.lower()
-        or "applications closed"
-        in text.lower()
+        in (
+            text or ""
+        ).lower()
     ):
 
         score -= 35
@@ -1208,19 +1498,16 @@ def calculate_match_score(
     )
 
     if score >= 80:
-
         eligibility = (
             "Excellent match"
         )
 
     elif score >= 60:
-
         eligibility = (
             "Possible match"
         )
 
     else:
-
         eligibility = (
             "Low match"
         )
@@ -1234,10 +1521,10 @@ def calculate_match_score(
     )
 
 
-def search_result_to_opportunity(
+def result_to_opportunity(
     result,
     profile,
-    source_query,
+    query,
 ):
 
     title = result.get(
@@ -1255,13 +1542,13 @@ def search_result_to_opportunity(
         "",
     )
 
-    basic_text = (
+    page_text = (
         f"{title}\n{snippet}"
     )
 
-    page_text = basic_text
     final_url = link
-    contact_email = ""
+
+    email = ""
 
     try:
 
@@ -1278,13 +1565,9 @@ def search_result_to_opportunity(
             soup.stripped_strings
         )[:100000]
 
-        emails = extract_emails(
-            page_text
-        )
-
-        contact_email = (
-            best_contact_email(
-                emails
+        email = best_email(
+            extract_emails(
+                page_text
             )
         )
 
@@ -1292,13 +1575,13 @@ def search_result_to_opportunity(
         pass
 
     full_text = (
-        f"{basic_text}\n{page_text}"
+        f"{title}\n"
+        f"{snippet}\n"
+        f"{page_text}"
     )
 
-    opportunity_type = (
-        classify_opportunity(
-            full_text
-        )
+    opp_type = classify(
+        full_text
     )
 
     category = infer_category(
@@ -1309,55 +1592,51 @@ def search_result_to_opportunity(
         full_text
     )
 
-    min_followers = (
-        extract_min_followers(
-            full_text
-        )
-    )
-
-    brand = brand_from_result(
-        title,
-        final_url,
+    minimum = min_followers(
+        full_text
     )
 
     (
         score,
         eligibility,
-        score_reason,
-    ) = calculate_match_score(
+        reason,
+    ) = score_match(
 
         profile,
         region,
-        min_followers,
+        minimum,
         category,
-        opportunity_type,
+        opp_type,
         full_text,
     )
 
-    parsed_url = urlparse(
+    parsed = urlparse(
         final_url
     )
 
     website = ""
 
-    if parsed_url.netloc:
+    if parsed.netloc:
 
         website = (
-            f"{parsed_url.scheme}"
+            f"{parsed.scheme}"
             f"://"
-            f"{parsed_url.netloc}"
+            f"{parsed.netloc}"
         )
 
     return {
 
         "brand":
-        brand,
+        brand_name(
+            title,
+            final_url,
+        ),
 
         "category":
         category,
 
         "opportunity_type":
-        opportunity_type,
+        opp_type,
 
         "program_name":
         title[:180],
@@ -1366,7 +1645,7 @@ def search_result_to_opportunity(
         final_url,
 
         "contact_email":
-        contact_email,
+        email,
 
         "brand_website":
         website,
@@ -1375,7 +1654,7 @@ def search_result_to_opportunity(
         region,
 
         "min_followers":
-        min_followers,
+        minimum,
 
         "requirements":
         snippet[:700],
@@ -1390,38 +1669,48 @@ def search_result_to_opportunity(
         score,
 
         "score_reason":
-        score_reason,
+        reason,
 
         "status":
         "Not Applied",
 
         "source_query":
-        source_query,
+        query,
     }
 
 
-# =========================================================
+# =========================
 # OPENAI
-# =========================================================
+# =========================
 
-def get_openai_client(api_key):
+def ai_client():
+
+    key = st.secrets.get(
+        "OPENAI_API_KEY",
+        os.getenv(
+            "OPENAI_API_KEY",
+            "",
+        ),
+    )
 
     if (
-        not api_key
-        or OpenAI is None
+        not key
+        or
+        not OpenAI
     ):
         return None
 
     return OpenAI(
-        api_key=api_key
+        api_key=key
     )
 
 
-def generate_ai_text(
-    client,
+def ai_generate(
     system,
     user,
 ):
+
+    client = ai_client()
 
     if not client:
         return None
@@ -1431,16 +1720,20 @@ def generate_ai_text(
         response = (
             client.responses.create(
                 model="gpt-4.1-mini",
+
                 input=[
                     {
                         "role":
                         "system",
+
                         "content":
                         system,
                     },
+
                     {
                         "role":
                         "user",
+
                         "content":
                         user,
                     },
@@ -1448,7 +1741,9 @@ def generate_ai_text(
             )
         )
 
-        return response.output_text
+        return (
+            response.output_text
+        )
 
     except Exception as e:
 
@@ -1457,285 +1752,29 @@ def generate_ai_text(
         )
 
 
-# =========================================================
-# UI
-# =========================================================
-
-def inject_css():
-
-    st.markdown(
-        f"""
-        <style>
-
-        .stApp {{
-            background:
-            radial-gradient(
-                circle at 8% 8%,
-                rgba(255,214,231,.75),
-                transparent 22%
-            ),
-            radial-gradient(
-                circle at 92% 0%,
-                rgba(237,221,255,.60),
-                transparent 22%
-            ),
-            linear-gradient(
-                180deg,
-                #fff9fc 0%,
-                #fff5fa 100%
-            );
-
-            color: {TEXT};
-        }}
-
-        [data-testid="stSidebar"] {{
-
-            background:
-            linear-gradient(
-                180deg,
-                #ffd9e9 0%,
-                #fff3f8 55%,
-                #f8efff 100%
-            );
-
-            border-right:
-            1px solid
-            rgba(255,95,162,.18);
-        }}
-
-        h1, h2, h3 {{
-            color: #602b47 !important;
-        }}
-
-        .hero {{
-
-            background:
-            linear-gradient(
-                135deg,
-                rgba(255,255,255,.96),
-                rgba(255,234,243,.96)
-            );
-
-            border:
-            1px solid
-            rgba(255,95,162,.22);
-
-            padding:
-            28px 30px;
-
-            border-radius:
-            28px;
-
-            margin-bottom:
-            20px;
-
-            box-shadow:
-            0 16px 45px
-            rgba(155,72,112,.10);
-        }}
-
-        .hero-title {{
-
-            font-size:
-            42px;
-
-            font-weight:
-            850;
-
-            color:
-            #5d2944;
-        }}
-
-        .hero-sub {{
-
-            color:
-            {MUTED};
-
-            font-size:
-            16px;
-        }}
-
-        .metric-card {{
-
-            background:
-            rgba(255,255,255,.92);
-
-            border:
-            1px solid
-            rgba(255,95,162,.16);
-
-            border-radius:
-            22px;
-
-            padding:
-            18px 20px;
-
-            min-height:
-            110px;
-        }}
-
-        .metric-label {{
-
-            color:
-            {MUTED};
-
-            font-size:
-            13px;
-
-            font-weight:
-            700;
-        }}
-
-        .metric-value {{
-
-            color:
-            #5d2944;
-
-            font-size:
-            31px;
-
-            font-weight:
-            850;
-
-            margin-top:
-            7px;
-        }}
-
-        .pink-chip {{
-
-            display:
-            inline-block;
-
-            padding:
-            5px 11px;
-
-            margin:
-            2px;
-
-            border-radius:
-            999px;
-
-            background:
-            #ffe1ed;
-
-            color:
-            #9f3467;
-
-            font-size:
-            12px;
-
-            font-weight:
-            700;
-        }}
-
-        div.stButton > button {{
-
-            border-radius:
-            14px;
-
-            font-weight:
-            750;
-
-            border:
-            1px solid
-            rgba(255,95,162,.22);
-        }}
-
-        div.stButton > button[kind="primary"] {{
-
-            background:
-            linear-gradient(
-                135deg,
-                {PINK},
-                {HOT_PINK}
-            );
-
-            color:
-            white;
-
-            border:
-            none;
-        }}
-
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def hero(
-    title,
-    subtitle,
-    emoji="✨",
-):
-
-    st.markdown(
-        f"""
-        <div class="hero">
-
-            <div class="hero-title">
-                {emoji} {title}
-            </div>
-
-            <div class="hero-sub">
-                {subtitle}
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def metric_card(
-    label,
-    value,
-    note="",
-):
-
-    return f"""
-    <div class="metric-card">
-
-        <div class="metric-label">
-            {label}
-        </div>
-
-        <div class="metric-value">
-            {value}
-        </div>
-
-        <div style="
-        font-size:12px;
-        color:{MUTED};
-        margin-top:4px;
-        ">
-            {note}
-        </div>
-
-    </div>
-    """
-
-
-# =========================================================
+# =========================
 # DASHBOARD
-# =========================================================
+# =========================
 
 def dashboard_page():
 
     hero(
-        "Charley’s PR Tracker",
+        APP_NAME,
         "Find, save and track PR, gifting and ambassador opportunities.",
-        "🎀",
     )
 
     df = get_opportunities()
 
-    total = len(df)
+    total = len(
+        df
+    )
 
     strong = (
         int(
             (
-                df["match_score"]
+                df[
+                    "match_score"
+                ]
                 >= 80
             ).sum()
         )
@@ -1745,7 +1784,10 @@ def dashboard_page():
 
     applied = (
         int(
-            df["status"].isin(
+            df[
+                "status"
+            ]
+            .isin(
                 [
                     "Applied",
                     "Follow-up Due",
@@ -1754,7 +1796,8 @@ def dashboard_page():
                     "PR Received",
                     "Collaboration",
                 ]
-            ).sum()
+            )
+            .sum()
         )
         if total
         else 0
@@ -1762,19 +1805,21 @@ def dashboard_page():
 
     wins = (
         int(
-            df["status"].isin(
+            df[
+                "status"
+            ]
+            .isin(
                 [
                     "Accepted",
                     "PR Received",
                     "Collaboration",
                 ]
-            ).sum()
+            )
+            .sum()
         )
         if total
         else 0
     )
-
-    columns = st.columns(4)
 
     cards = [
 
@@ -1802,6 +1847,10 @@ def dashboard_page():
             "accepted / PR",
         ),
     ]
+
+    columns = st.columns(
+        4
+    )
 
     for column, card in zip(
         columns,
@@ -1833,7 +1882,9 @@ def dashboard_page():
 
     best = (
         df[
-            df["status"]
+            df[
+                "status"
+            ]
             != "Not Interested"
         ]
         .sort_values(
@@ -1853,50 +1904,62 @@ def dashboard_page():
 
         favorite = (
             "💗"
-            if row["favorite"]
+            if row[
+                "favorite"
+            ]
             else "♡"
         )
 
         st.markdown(
-            f"""
-            ### {favorite} {row['brand']}
-
-            **{row['opportunity_type']}**
-
-            Match: **{int(row['match_score'])}/100**
-
-            {row['score_reason'] or ''}
-            """
+            f"### {favorite} {row['brand']}"
         )
+
+        st.write(
+            f"**{row['opportunity_type']}** · "
+            f"{int(row['match_score'])}/100 · "
+            f"{row['region']}"
+        )
+
+        if row[
+            "score_reason"
+        ]:
+
+            st.caption(
+                row[
+                    "score_reason"
+                ]
+            )
 
         st.divider()
 
 
-# =========================================================
-# PROFILE
-# =========================================================
+# =========================
+# CREATOR PROFILE
+# =========================
 
 def profile_page():
 
     hero(
         "Creator Profile",
-        "Charley’s information is used to score opportunities.",
+        "Used to score which opportunities are a good fit.",
         "💖",
     )
 
     profile = load_profile()
 
     with st.form(
-        "profile_form"
+        "profile"
     ):
 
-        left, right = st.columns(2)
+        left, right = st.columns(
+            2
+        )
 
         with left:
 
             name = st.text_input(
                 "Creator name",
-                value=profile.get(
+                profile.get(
                     "name",
                     "",
                 ),
@@ -1904,7 +1967,7 @@ def profile_page():
 
             email = st.text_input(
                 "Email",
-                value=profile.get(
+                profile.get(
                     "email",
                     "",
                 ),
@@ -1912,7 +1975,7 @@ def profile_page():
 
             country = st.text_input(
                 "Country",
-                value=profile.get(
+                profile.get(
                     "country",
                     "United Kingdom",
                 ),
@@ -1920,138 +1983,156 @@ def profile_page():
 
             niche = st.text_input(
                 "Niche",
-                value=profile.get(
+                profile.get(
                     "niche",
                     "Beauty / Lifestyle",
                 ),
             )
 
-            instagram_url = st.text_input(
-                "Instagram URL",
-                value=profile.get(
-                    "instagram_url",
-                    "",
-                ),
-            )
-
-            instagram_followers = st.number_input(
-                "Instagram followers",
-                min_value=0,
-                value=int(
+            instagram_url = (
+                st.text_input(
+                    "Instagram URL",
                     profile.get(
-                        "instagram_followers",
-                        0,
-                    )
-                    or 0
-                ),
-                step=100,
+                        "instagram_url",
+                        "",
+                    ),
+                )
             )
 
-            tiktok_url = st.text_input(
-                "TikTok URL",
-                value=profile.get(
-                    "tiktok_url",
-                    "",
-                ),
+            instagram_followers = (
+                st.number_input(
+                    "Instagram followers",
+                    min_value=0,
+                    value=int(
+                        profile.get(
+                            "instagram_followers"
+                        )
+                        or 0
+                    ),
+                    step=100,
+                )
             )
 
-            tiktok_followers = st.number_input(
-                "TikTok followers",
-                min_value=0,
-                value=int(
+            tiktok_url = (
+                st.text_input(
+                    "TikTok URL",
                     profile.get(
-                        "tiktok_followers",
-                        0,
-                    )
-                    or 0
-                ),
-                step=100,
+                        "tiktok_url",
+                        "",
+                    ),
+                )
+            )
+
+            tiktok_followers = (
+                st.number_input(
+                    "TikTok followers",
+                    min_value=0,
+                    value=int(
+                        profile.get(
+                            "tiktok_followers"
+                        )
+                        or 0
+                    ),
+                    step=100,
+                )
             )
 
         with right:
 
-            youtube_url = st.text_input(
-                "YouTube URL",
-                value=profile.get(
-                    "youtube_url",
-                    "",
-                ),
-            )
-
-            youtube_followers = st.number_input(
-                "YouTube followers",
-                min_value=0,
-                value=int(
+            youtube_url = (
+                st.text_input(
+                    "YouTube URL",
                     profile.get(
-                        "youtube_followers",
-                        0,
-                    )
-                    or 0
-                ),
-                step=100,
+                        "youtube_url",
+                        "",
+                    ),
+                )
             )
 
-            average_views = st.number_input(
-                "Average views",
-                min_value=0,
-                value=int(
+            youtube_followers = (
+                st.number_input(
+                    "YouTube followers",
+                    min_value=0,
+                    value=int(
+                        profile.get(
+                            "youtube_followers"
+                        )
+                        or 0
+                    ),
+                    step=100,
+                )
+            )
+
+            average_views = (
+                st.number_input(
+                    "Average views",
+                    min_value=0,
+                    value=int(
+                        profile.get(
+                            "average_views"
+                        )
+                        or 0
+                    ),
+                    step=100,
+                )
+            )
+
+            engagement_rate = (
+                st.number_input(
+                    "Engagement rate (%)",
+                    min_value=0.0,
+                    value=float(
+                        profile.get(
+                            "engagement_rate"
+                        )
+                        or 0
+                    ),
+                    step=0.1,
+                )
+            )
+
+            audience = (
+                st.text_area(
+                    "Audience demographics",
                     profile.get(
-                        "average_views",
-                        0,
-                    )
-                    or 0
-                ),
-                step=100,
+                        "audience",
+                        "",
+                    ),
+                )
             )
 
-            engagement_rate = st.number_input(
-                "Engagement rate (%)",
-                min_value=0.0,
-                value=float(
+            creator_bio = (
+                st.text_area(
+                    "Creator bio",
                     profile.get(
-                        "engagement_rate",
-                        0,
-                    )
-                    or 0
-                ),
-                step=0.1,
+                        "creator_bio",
+                        "",
+                    ),
+                )
             )
 
-            audience = st.text_area(
-                "Audience demographics",
-                value=profile.get(
-                    "audience",
-                    "",
-                ),
+            media_kit_url = (
+                st.text_input(
+                    "Media kit URL",
+                    profile.get(
+                        "media_kit_url",
+                        "",
+                    ),
+                )
             )
 
-            creator_bio = st.text_area(
-                "Creator bio",
-                value=profile.get(
-                    "creator_bio",
-                    "",
-                ),
+        submit = (
+            st.form_submit_button(
+                "Save creator profile 💾",
+                type="primary",
+                use_container_width=True,
             )
-
-            media_kit_url = st.text_input(
-                "Media kit URL",
-                value=profile.get(
-                    "media_kit_url",
-                    "",
-                ),
-            )
-
-        submit = st.form_submit_button(
-            "Save creator profile 💾",
-            type="primary",
-            use_container_width=True,
         )
 
     if submit:
 
         save_profile(
             {
-
                 "name":
                 name,
 
@@ -2104,9 +2185,9 @@ def profile_page():
         )
 
 
-# =========================================================
+# =========================
 # FIND OPPORTUNITIES
-# =========================================================
+# =========================
 
 def find_page(
     serper_key
@@ -2120,12 +2201,6 @@ def find_page(
 
     profile = load_profile()
 
-    if not profile:
-
-        st.warning(
-            "Create the Creator Profile first for better match scores."
-        )
-
     mode = st.radio(
 
         "Discovery mode",
@@ -2138,7 +2213,9 @@ def find_page(
         horizontal=True,
     )
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = st.columns(
+        3
+    )
 
     with c1:
 
@@ -2161,7 +2238,7 @@ def find_page(
 
     with c3:
 
-        result_count = st.slider(
+        count = st.slider(
             "Results",
             3,
             20,
@@ -2170,7 +2247,7 @@ def find_page(
 
     custom = st.text_input(
         "Optional keyword",
-        placeholder="e.g. small brands, TikTok, micro influencer",
+        placeholder="e.g. micro influencer, skincare, TikTok",
     )
 
     if mode == "Program Search":
@@ -2211,7 +2288,10 @@ def find_page(
     )
 
     if custom:
-        query += f" {custom}"
+
+        query += (
+            f" {custom}"
+        )
 
     st.caption(
         f"Search: {query}"
@@ -2226,7 +2306,7 @@ def find_page(
         if not serper_key:
 
             st.error(
-                "Opportunity search isn't connected. Check SERPER_API_KEY in Streamlit Secrets."
+                "Opportunity search is not connected."
             )
 
             return
@@ -2236,7 +2316,7 @@ def find_page(
             results = serper_search(
                 query,
                 serper_key,
-                result_count,
+                count,
             )
 
         except Exception as e:
@@ -2247,34 +2327,27 @@ def find_page(
 
             return
 
-        if not results:
-
-            st.warning(
-                "No search results found."
-            )
-
-            return
-
-        progress = st.progress(0)
-
-        status = st.empty()
-
         added = 0
+        duplicates = 0
 
-        duplicate_count = 0
+        progress = st.progress(
+            0
+        )
+
+        label = st.empty()
 
         for index, result in enumerate(
             results
         ):
 
-            status.write(
+            label.write(
                 f"Checking {index + 1}/{len(results)} — {result.get('title', '')[:70]}"
             )
 
             try:
 
                 opportunity = (
-                    search_result_to_opportunity(
+                    result_to_opportunity(
                         result,
                         profile,
                         query,
@@ -2291,7 +2364,7 @@ def find_page(
                     added += 1
 
                 else:
-                    duplicate_count += 1
+                    duplicates += 1
 
             except Exception:
                 pass
@@ -2300,20 +2373,24 @@ def find_page(
                 (
                     index + 1
                 )
-                / len(results)
+                /
+                max(
+                    1,
+                    len(results),
+                )
             )
 
-        status.empty()
+        label.empty()
 
         st.success(
             f"Finished 💗 Added {added} new opportunities. "
-            f"Skipped {duplicate_count} duplicates."
+            f"Skipped {duplicates} duplicates."
         )
 
 
-# =========================================================
+# =========================
 # DATABASE
-# =========================================================
+# =========================
 
 def database_page():
 
@@ -2333,11 +2410,13 @@ def database_page():
 
         return
 
-    f1, f2, f3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(
+        4
+    )
 
-    with f1:
+    with c1:
 
-        category_filter = (
+        categories = (
             st.multiselect(
                 "Category",
                 sorted(
@@ -2351,9 +2430,9 @@ def database_page():
             )
         )
 
-    with f2:
+    with c2:
 
-        type_filter = (
+        types = (
             st.multiselect(
                 "Type",
                 sorted(
@@ -2367,72 +2446,105 @@ def database_page():
             )
         )
 
-    with f3:
+    with c3:
 
-        minimum_score = st.slider(
-            "Minimum score",
-            0,
-            100,
-            0,
+        statuses = (
+            st.multiselect(
+                "Status",
+                STATUSES,
+            )
         )
 
-    filtered = df.copy()
+    with c4:
 
-    if category_filter:
+        min_score = (
+            st.slider(
+                "Minimum score",
+                0,
+                100,
+                0,
+            )
+        )
+
+    filtered = df[
+        df[
+            "match_score"
+        ]
+        >= min_score
+    ].copy()
+
+    if categories:
 
         filtered = filtered[
             filtered[
                 "category"
-            ].isin(
-                category_filter
+            ]
+            .isin(
+                categories
             )
         ]
 
-    if type_filter:
+    if types:
 
         filtered = filtered[
             filtered[
                 "opportunity_type"
-            ].isin(
-                type_filter
+            ]
+            .isin(
+                types
             )
         ]
 
-    filtered = filtered[
-        filtered[
-            "match_score"
+    if statuses:
+
+        filtered = filtered[
+            filtered[
+                "status"
+            ]
+            .isin(
+                statuses
+            )
         ]
-        >= minimum_score
-    ]
 
-    filtered = filtered.sort_values(
-        "match_score",
-        ascending=False,
-    )
-
-    st.caption(
-        f"{len(filtered)} opportunities"
+    filtered = (
+        filtered.sort_values(
+            [
+                "favorite",
+                "match_score",
+            ],
+            ascending=[
+                False,
+                False,
+            ],
+        )
     )
 
     for _, row in filtered.iterrows():
 
-        favorite_icon = (
+        favorite = (
             "💗"
-            if row["favorite"]
+            if row[
+                "favorite"
+            ]
             else "♡"
         )
 
         title = (
-            f"{favorite_icon} "
+            f"{favorite} "
             f"{row['brand']} — "
             f"{row['opportunity_type']} — "
             f"{int(row['match_score'])}/100"
         )
 
-        with st.expander(title):
+        with st.expander(
+            title
+        ):
 
             left, right = st.columns(
-                [2, 1]
+                [
+                    2,
+                    1,
+                ]
             )
 
             with left:
@@ -2442,15 +2554,12 @@ def database_page():
                 )
 
                 st.write(
-                    f"**Category:** {row['category']}"
-                )
-
-                st.write(
+                    f"**Category:** {row['category']} · "
                     f"**Region:** {row['region']}"
                 )
 
                 st.write(
-                    f"**Eligibility:** {row['eligibility']}"
+                    f"**Eligibility:** {row['eligibility'] or '—'}"
                 )
 
                 st.write(
@@ -2505,56 +2614,61 @@ def database_page():
                                 "status"
                             ]
                         )
+
                         if row[
                             "status"
                         ]
                         in STATUSES
+
                         else 0
                     ),
 
-                    key=f"status_{row['id']}",
+                    key=
+                    f"s{row['id']}",
                 )
 
-                favorite = st.checkbox(
-
-                    "Favorite 💗",
-
-                    value=bool(
-                        row[
-                            "favorite"
-                        ]
-                    ),
-
-                    key=f"fav_{row['id']}",
+                favorite_checked = (
+                    st.checkbox(
+                        "Favorite 💗",
+                        value=bool(
+                            row[
+                                "favorite"
+                            ]
+                        ),
+                        key=
+                        f"f{row['id']}",
+                    )
                 )
 
-                notes = st.text_area(
-
-                    "Notes",
-
-                    value=(
-                        row[
-                            "notes"
-                        ]
-                        or ""
-                    ),
-
-                    key=f"notes_{row['id']}",
+                notes = (
+                    st.text_area(
+                        "Notes",
+                        value=(
+                            row[
+                                "notes"
+                            ]
+                            or ""
+                        ),
+                        key=
+                        f"n{row['id']}",
+                    )
                 )
 
                 if st.button(
                     "Save changes",
-                    key=f"save_{row['id']}",
+                    key=
+                    f"save{row['id']}",
                     use_container_width=True,
                 ):
 
-                    update_fields = {
-
+                    fields = {
                         "status":
                         status,
 
                         "favorite":
-                        1 if favorite else 0,
+                        1
+                        if favorite_checked
+                        else 0,
 
                         "notes":
                         notes,
@@ -2563,12 +2677,13 @@ def database_page():
                     if (
                         status
                         == "Applied"
-                        and not row[
+                        and
+                        not row[
                             "date_applied"
                         ]
                     ):
 
-                        update_fields[
+                        fields[
                             "date_applied"
                         ] = (
                             datetime.now()
@@ -2579,54 +2694,54 @@ def database_page():
 
                     update_opportunity(
                         int(
-                            row["id"]
+                            row[
+                                "id"
+                            ]
                         ),
-                        update_fields,
-                    )
-
-                    st.success(
-                        "Saved ✨"
+                        fields,
                     )
 
                     st.rerun()
 
                 if st.button(
-
                     "Delete",
-
-                    key=f"delete_{row['id']}",
-
+                    key=
+                    f"del{row['id']}",
                     use_container_width=True,
                 ):
 
                     delete_opportunity(
                         int(
-                            row["id"]
+                            row[
+                                "id"
+                            ]
                         )
                     )
 
                     st.rerun()
 
 
-# =========================================================
+# =========================
 # MANUAL ADD
-# =========================================================
+# =========================
 
-def manual_add_page():
+def add_page():
 
     hero(
         "Add Opportunity",
-        "Save a PR opportunity you found yourself.",
+        "Save something you found yourself.",
         "➕",
     )
 
     profile = load_profile()
 
     with st.form(
-        "manual_add"
+        "add"
     ):
 
-        left, right = st.columns(2)
+        left, right = st.columns(
+            2
+        )
 
         with left:
 
@@ -2639,35 +2754,25 @@ def manual_add_page():
                 CATEGORIES,
             )
 
-            opportunity_type = (
-                st.selectbox(
-                    "Opportunity type",
-                    OPPORTUNITY_TYPES,
-                )
+            opp_type = st.selectbox(
+                "Opportunity type",
+                OPP_TYPES,
             )
 
-            program_name = (
-                st.text_input(
-                    "Program name"
-                )
+            program = st.text_input(
+                "Program name"
             )
 
-            application_url = (
-                st.text_input(
-                    "Application URL"
-                )
+            url = st.text_input(
+                "Application URL"
             )
 
-            contact_email = (
-                st.text_input(
-                    "PR / influencer email"
-                )
+            email = st.text_input(
+                "PR / influencer email"
             )
 
-            brand_website = (
-                st.text_input(
-                    "Brand website"
-                )
+            website = st.text_input(
+                "Brand website"
             )
 
         with right:
@@ -2677,24 +2782,21 @@ def manual_add_page():
                 REGIONS,
             )
 
-            min_followers = (
-                st.number_input(
-                    "Minimum followers",
-                    min_value=0,
-                    step=100,
-                )
+            minimum = st.number_input(
+                "Minimum followers",
+                min_value=0,
+                step=100,
             )
 
-            requirements = (
-                st.text_area(
-                    "Requirements"
-                )
+            requirements = st.text_area(
+                "Requirements"
             )
 
             compensation = (
                 st.text_input(
                     "Compensation",
-                    placeholder="Gifted / commission / paid",
+                    placeholder=
+                    "Gifted / commission / paid",
                 )
             )
 
@@ -2724,24 +2826,18 @@ def manual_add_page():
             score,
             eligibility,
             reason,
-        ) = calculate_match_score(
+        ) = score_match(
 
             profile,
-
             region,
-
-            min_followers,
-
+            minimum,
             category,
-
-            opportunity_type,
-
+            opp_type,
             requirements,
         )
 
         insert_opportunity(
             {
-
                 "brand":
                 brand.strip(),
 
@@ -2749,25 +2845,25 @@ def manual_add_page():
                 category,
 
                 "opportunity_type":
-                opportunity_type,
+                opp_type,
 
                 "program_name":
-                program_name,
+                program,
 
                 "application_url":
-                application_url,
+                url,
 
                 "contact_email":
-                contact_email,
+                email,
 
                 "brand_website":
-                brand_website,
+                website,
 
                 "region":
                 region,
 
                 "min_followers":
-                min_followers,
+                minimum,
 
                 "requirements":
                 requirements,
@@ -2800,17 +2896,15 @@ def manual_add_page():
         )
 
 
-# =========================================================
+# =========================
 # APPLICATION ASSISTANT
-# =========================================================
+# =========================
 
-def application_assistant_page(
-    openai_key
-):
+def assistant_page():
 
     hero(
         "Application Assistant",
-        "Generate application answers and PR emails. Nothing is automatically submitted.",
+        "Generate answers and PR emails. Nothing is automatically submitted.",
         "💌",
     )
 
@@ -2830,35 +2924,37 @@ def application_assistant_page(
 
         f"{row['brand']} — {row['opportunity_type']} — #{row['id']}":
         int(
-            row["id"]
+            row[
+                "id"
+            ]
         )
 
         for _, row
         in df.iterrows()
     }
 
-    selected = st.selectbox(
+    choice = st.selectbox(
         "Choose opportunity",
         list(
             options.keys()
         ),
     )
 
-    opportunity_id = options[
-        selected
-    ]
+    opportunity_id = (
+        options[
+            choice
+        ]
+    )
 
     row = (
         df[
-            df["id"]
+            df[
+                "id"
+            ]
             == opportunity_id
         ]
         .iloc[0]
         .to_dict()
-    )
-
-    client = get_openai_client(
-        openai_key
     )
 
     tab1, tab2 = st.tabs(
@@ -2870,11 +2966,11 @@ def application_assistant_page(
 
     with tab1:
 
-        questions = st.text_area(
-
-            "Paste the application questions",
-
-            height=180,
+        questions = (
+            st.text_area(
+                "Paste application questions",
+                height=160,
+            )
         )
 
         if st.button(
@@ -2882,16 +2978,16 @@ def application_assistant_page(
             type="primary",
         ):
 
-            if not questions.strip():
-
-                st.warning(
-                    "Paste some questions first."
-                )
-
-            elif not client:
+            if not ai_client():
 
                 st.error(
                     "Add OPENAI_API_KEY to Streamlit Secrets first."
+                )
+
+            elif not questions.strip():
+
+                st.warning(
+                    "Paste some questions first."
                 )
 
             else:
@@ -2900,42 +2996,36 @@ def application_assistant_page(
 CREATOR PROFILE:
 {json.dumps(profile, indent=2)}
 
-BRAND OPPORTUNITY:
+OPPORTUNITY:
 {json.dumps(row, indent=2)}
 
-APPLICATION QUESTIONS:
+QUESTIONS:
 {questions}
 
-Write natural, polished application answers.
+Write natural, concise answers.
 
-Do not invent achievements, statistics, previous collaborations or claims that the creator uses the brand.
+Do not invent facts.
 
-Keep the answers confident, warm and personal.
+Do not claim she uses the brand unless stated.
 """
 
-                result = generate_ai_text(
-
-                    client,
-
-                    "You help social media creators apply to brand partnership programs.",
-
-                    prompt,
+                result = (
+                    ai_generate(
+                        "You help creators apply to brand partnership programs.",
+                        prompt,
+                    )
                 )
 
                 st.text_area(
-
                     "Generated answers",
-
-                    value=result or "",
-
-                    height=350,
+                    result or "",
+                    height=320,
                 )
 
     with tab2:
 
-        extra = st.text_area(
-            "Optional note",
-            placeholder="Anything specific Charley wants mentioned",
+        note = st.text_area(
+            "Optional note"
         )
 
         if st.button(
@@ -2943,7 +3033,7 @@ Keep the answers confident, warm and personal.
             type="primary",
         ):
 
-            if not client:
+            if not ai_client():
 
                 st.error(
                     "Add OPENAI_API_KEY to Streamlit Secrets first."
@@ -2955,105 +3045,85 @@ Keep the answers confident, warm and personal.
 CREATOR PROFILE:
 {json.dumps(profile, indent=2)}
 
-BRAND:
+OPPORTUNITY:
 {json.dumps(row, indent=2)}
 
-EXTRA NOTE:
-{extra}
+NOTE:
+{note}
 
-Write a short personalised creator-to-brand PR or collaboration email.
-
-Do not claim she already uses the brand unless the profile or note says that.
+Write a short personalised PR or collaboration email.
 
 Include a subject line.
 
-Keep it concise and natural.
+Do not invent facts.
 """
 
-                result = generate_ai_text(
-
-                    client,
-
-                    "You write creator outreach emails to beauty and lifestyle brands.",
-
-                    prompt,
+                result = (
+                    ai_generate(
+                        "You write concise creator outreach emails.",
+                        prompt,
+                    )
                 )
 
                 st.text_area(
-
                     "Generated email",
-
-                    value=result or "",
-
-                    height=300,
+                    result or "",
+                    height=280,
                 )
 
 
-# =========================================================
+# =========================
 # APPLICATION TRACKER
-# =========================================================
+# =========================
 
 def tracker_page():
 
     hero(
         "Application Tracker",
-        "Track applications, responses and PR wins.",
+        "Track applications, replies, PR packages and collaborations.",
         "📋",
     )
 
     df = get_opportunities()
 
-    if df.empty:
-
-        st.info(
-            "Nothing to track yet."
-        )
-
-        return
-
-    track = df[
-        df["status"]
-        != "Not Applied"
-    ].copy()
+    track = (
+        df[
+            df[
+                "status"
+            ]
+            != "Not Applied"
+        ]
+        .copy()
+    )
 
     if track.empty:
 
         st.info(
-            "Change an opportunity to Want to Apply or Applied first."
+            "Mark something Want to Apply or Applied first."
         )
 
         return
 
     columns = [
-
         "id",
-
         "brand",
-
         "opportunity_type",
-
         "status",
-
         "match_score",
-
         "date_applied",
-
         "follow_up_date",
-
         "response",
-
         "products_received",
-
         "deliverables",
-
         "payment",
-
         "notes",
     ]
 
     edited = st.data_editor(
 
-        track[columns],
+        track[
+            columns
+        ],
 
         hide_index=True,
 
@@ -3067,13 +3137,16 @@ def tracker_page():
         column_config={
 
             "status":
-            st.column_config.SelectboxColumn(
+            st.column_config
+            .SelectboxColumn(
                 "Status",
-                options=STATUSES,
+                options=
+                STATUSES,
             ),
 
             "match_score":
-            st.column_config.ProgressColumn(
+            st.column_config
+            .ProgressColumn(
                 "Match",
                 min_value=0,
                 max_value=100,
@@ -3098,10 +3171,12 @@ def tracker_page():
         for _, row in edited.iterrows():
 
             opportunity_id = int(
-                row["id"]
+                row[
+                    "id"
+                ]
             )
 
-            updates = {}
+            changes = {}
 
             for column in columns:
 
@@ -3113,24 +3188,32 @@ def tracker_page():
                 ]:
                     continue
 
-                new_value = row[
-                    column
-                ]
+                new_value = (
+                    ""
+                    if pd.isna(
+                        row[
+                            column
+                        ]
+                    )
+                    else row[
+                        column
+                    ]
+                )
 
-                old_value = original.loc[
-                    opportunity_id,
-                    column,
-                ]
-
-                if pd.isna(
-                    new_value
-                ):
-                    new_value = ""
-
-                if pd.isna(
-                    old_value
-                ):
-                    old_value = ""
+                old_value = (
+                    ""
+                    if pd.isna(
+                        original.loc[
+                            opportunity_id,
+                            column,
+                        ]
+                    )
+                    else
+                    original.loc[
+                        opportunity_id,
+                        column,
+                    ]
+                )
 
                 if str(
                     new_value
@@ -3138,33 +3221,29 @@ def tracker_page():
                     old_value
                 ):
 
-                    updates[
+                    changes[
                         column
                     ] = new_value
 
-            if updates:
+            if changes:
 
                 update_opportunity(
                     opportunity_id,
-                    updates,
+                    changes,
                 )
-
-        st.success(
-            "Tracker updated ✨"
-        )
 
         st.rerun()
 
 
-# =========================================================
+# =========================
 # STATS
-# =========================================================
+# =========================
 
 def stats_page():
 
     hero(
         "Stats",
-        "See which opportunities are turning into wins.",
+        "See what is turning into wins.",
         "📊",
     )
 
@@ -3173,23 +3252,24 @@ def stats_page():
     if df.empty:
 
         st.info(
-            "Stats will appear once opportunities are saved."
+            "Stats appear once opportunities are saved."
         )
 
         return
 
     st.subheader(
-        "Application Status"
+        "Status"
     )
 
     st.bar_chart(
         df[
             "status"
-        ].value_counts()
+        ]
+        .value_counts()
     )
 
     st.subheader(
-        "Average Match Score"
+        "Average match score"
     )
 
     averages = (
@@ -3211,11 +3291,11 @@ def stats_page():
         averages
     )
 
-    applications = df[
-
+    applied = df[
         df[
             "status"
-        ].isin(
+        ]
+        .isin(
             [
                 "Applied",
                 "Follow-up Due",
@@ -3229,10 +3309,10 @@ def stats_page():
     ]
 
     wins = df[
-
         df[
             "status"
-        ].isin(
+        ]
+        .isin(
             [
                 "Accepted",
                 "PR Received",
@@ -3242,24 +3322,30 @@ def stats_page():
     ]
 
     rate = (
-
-        len(wins)
-        / len(applications)
+        len(
+            wins
+        )
+        /
+        len(
+            applied
+        )
         * 100
 
         if len(
-            applications
+            applied
         )
 
         else 0
     )
 
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3 = st.columns(
+        3
+    )
 
     c1.metric(
         "Applications",
         len(
-            applications
+            applied
         ),
     )
 
@@ -3271,21 +3357,20 @@ def stats_page():
     )
 
     c3.metric(
-        "Win Rate",
+        "Win rate",
         f"{rate:.1f}%",
     )
 
 
-# =========================================================
-# MAIN APP
-# =========================================================
+# =========================
+# MAIN
+# =========================
 
 def main():
 
     st.set_page_config(
-
         page_title=
-        "Charley’s PR Tracker",
+        APP_NAME,
 
         page_icon=
         "🎀",
@@ -3304,7 +3389,7 @@ def main():
     with st.sidebar:
 
         st.markdown(
-            "## 🎀 Charley’s PR Tracker"
+            f"## 🎀 {APP_NAME}"
         )
 
         st.caption(
@@ -3316,21 +3401,13 @@ def main():
             "Navigation",
 
             [
-
                 "Dashboard",
-
                 "Creator Profile",
-
                 "Find Opportunities",
-
                 "Opportunity Database",
-
                 "Add Opportunity",
-
                 "Application Assistant",
-
                 "Application Tracker",
-
                 "Stats",
             ],
 
@@ -3344,7 +3421,7 @@ def main():
             "### 🔑 Connections"
         )
 
-        if storage_configured():
+        if storage_ready():
 
             st.success(
                 "Google Sheets connected ✅"
@@ -3356,14 +3433,14 @@ def main():
                 "Google Sheets not connected"
             )
 
-        serper_key = st.secrets.get(
-
-            "SERPER_API_KEY",
-
-            os.getenv(
+        serper_key = (
+            st.secrets.get(
                 "SERPER_API_KEY",
-                "",
-            ),
+                os.getenv(
+                    "SERPER_API_KEY",
+                    "",
+                ),
+            )
         )
 
         if serper_key:
@@ -3378,17 +3455,7 @@ def main():
                 "Opportunity search not connected"
             )
 
-        openai_key = st.secrets.get(
-
-            "OPENAI_API_KEY",
-
-            os.getenv(
-                "OPENAI_API_KEY",
-                "",
-            ),
-        )
-
-        if openai_key:
+        if ai_client():
 
             st.success(
                 "AI assistant connected ✅"
@@ -3406,41 +3473,39 @@ def main():
             "Nothing is automatically submitted or emailed. 💗"
         )
 
-    if page == "Dashboard":
+    pages = {
 
-        dashboard_page()
+        "Dashboard":
+        dashboard_page,
 
-    elif page == "Creator Profile":
+        "Creator Profile":
+        profile_page,
 
-        profile_page()
-
-    elif page == "Find Opportunities":
-
+        "Find Opportunities":
+        lambda:
         find_page(
             serper_key
-        )
+        ),
 
-    elif page == "Opportunity Database":
+        "Opportunity Database":
+        database_page,
 
-        database_page()
+        "Add Opportunity":
+        add_page,
 
-    elif page == "Add Opportunity":
+        "Application Assistant":
+        assistant_page,
 
-        manual_add_page()
+        "Application Tracker":
+        tracker_page,
 
-    elif page == "Application Assistant":
+        "Stats":
+        stats_page,
+    }
 
-        application_assistant_page(
-            openai_key
-        )
-
-    elif page == "Application Tracker":
-
-        tracker_page()
-
-    elif page == "Stats":
-
-        stats_page()
+    pages[
+        page
+    ]()
 
 
 if __name__ == "__main__":
